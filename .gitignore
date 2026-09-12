@@ -1,0 +1,10 @@
+data/
+*.csv
+*.tif
+*.geojson
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+.vscode/
