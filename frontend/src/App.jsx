@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react'
-import { MapContainer, TileLayer, GeoJSON, Popup, Marker, useMap } from 'react-leaflet'
+import MarkerClusterGroup from 'react-leaflet-cluster'
+import { useState, useEffect, useRef } from 'react'
+import { MapContainer, TileLayer, GeoJSON, Popup, Marker, useMap, useMapEvents, Polyline, CircleMarker } from 'react-leaflet'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import MarkerClusterGroup from 'react-leaflet-cluster'
 
 const policeIcon = new L.DivIcon({
   html: `
@@ -42,8 +42,95 @@ function getLabel(sri) {
   if (sri > 300) return 'Medium Risk'
   return 'Low Risk'
 }
+function RoutePlanner() {
+  const [active, setActive] = useState(false)
+  const [points, setPoints] = useState([])
+  const [routes, setRoutes] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [alpha, setAlpha] = useState(8)
+  const panelRef = useRef(null)
 
-function SearchBar() {
+  useEffect(() => {
+    if (panelRef.current) L.DomEvent.disableClickPropagation(panelRef.current)
+  }, [])
+
+  const fetchRoutes = async (pts, a) => {
+    setLoading(true)
+    try {
+      const [p, q] = pts
+      const url = `http://127.0.0.1:8000/safe-route?start_lat=${p[0]}&start_lon=${p[1]}&end_lat=${q[0]}&end_lon=${q[1]}&alpha=${a}`
+      const res = await fetch(url)
+      if (!res.ok) throw new Error('No route')
+      setRoutes(await res.json())
+    } catch {
+      alert('Could not find a route for these points')
+    }
+    setLoading(false)
+  }
+
+  useMapEvents({
+    click(e) {
+      if (!active || points.length >= 2) return
+      const next = [...points, [e.latlng.lat, e.latlng.lng]]
+      setPoints(next)
+      if (next.length === 2) fetchRoutes(next, alpha)
+    },
+  })
+
+  const reset = () => { setPoints([]); setRoutes(null) }
+  const extra = routes ? ((routes.safest.distance_km / routes.shortest.distance_km - 1) * 100).toFixed(1) : null
+  const drop = routes ? ((1 - routes.safest.average_sri / routes.shortest.average_sri) * 100).toFixed(1) : null
+
+  return (
+    <>
+      <div ref={panelRef} className="absolute top-4 left-1/2 -translate-x-1/2 z-[1000] bg-gray-800 text-white px-4 py-3 rounded-lg shadow-lg text-sm w-72">
+        <button
+          onClick={() => { setActive(!active); reset() }}
+          className="w-full bg-emerald-600 hover:bg-emerald-700 rounded px-3 py-1 font-semibold"
+        >
+          {active ? 'Cancel' : 'Plan safe route'}
+        </button>
+        {active && (
+          <div className="mt-2">
+            <label className="text-gray-300">Safety priority: {alpha} {alpha === 0 && '(= shortest)'}</label>
+            <input
+              type="range" min="0" max="20" step="1" value={alpha}
+              onChange={(e) => setAlpha(Number(e.target.value))}
+              onMouseUp={() => points.length === 2 && fetchRoutes(points, alpha)}
+              onTouchEnd={() => points.length === 2 && fetchRoutes(points, alpha)}
+              className="w-full"
+            />
+          </div>
+        )}
+        {active && !routes && !loading && (
+          <p className="mt-2 text-gray-300">
+            {points.length === 0 ? 'Click the start point on the map' : 'Click the destination'}
+          </p>
+        )}
+        {loading && <p className="mt-2 text-gray-300">Finding routes...</p>}
+        {routes && (
+          <div className="mt-2 space-y-1">
+            <p><span className="text-blue-400 font-bold">Shortest:</span> {routes.shortest.distance_km} km, avg SRI {routes.shortest.average_sri}</p>
+            <p><span className="text-green-400 font-bold">Safest:</span> {routes.safest.distance_km} km (+{extra}%), avg SRI {routes.safest.average_sri} (-{drop}%)</p>
+            <button onClick={reset} className="mt-1 underline text-gray-300">Reset</button>
+          </div>
+        )}
+      </div>
+
+      {points.map((p, i) => (
+        <CircleMarker key={i} center={p} radius={8}
+          pathOptions={{ color: 'white', fillColor: i === 0 ? '#2563eb' : '#dc2626', fillOpacity: 1 }} />
+      ))}
+      {routes && (
+        <>
+          <Polyline positions={routes.shortest.coords} pathOptions={{ color: '#1d4ed8', weight: 5 }} />
+          <Polyline positions={routes.safest.coords} pathOptions={{ color: '#065f46', weight: 5 }} />
+        </>
+      )}
+    </>
+  )
+}
+function SearchBar({ onFound }) {
   const [query, setQuery] = useState('')
   const map = useMap()
 
@@ -57,6 +144,7 @@ function SearchBar() {
     if (data.length > 0) {
       const { lat, lon } = data[0]
       map.setView([parseFloat(lat), parseFloat(lon)], 15)
+      if (onFound) onFound(parseFloat(lat), parseFloat(lon))
     } else {
       alert('Location not found')
     }
@@ -110,11 +198,54 @@ function Legend() {
     </div>
   )
 }
+function centroidOf(geometryStr) {
+  const ring = JSON.parse(geometryStr).coordinates[0]
+  const lon = ring.reduce((s, p) => s + p[0], 0) / ring.length
+  const lat = ring.reduce((s, p) => s + p[1], 0) / ring.length
+  return [lat, lon]
+}
 
+function ReportPanel({ report, onClose }) {
+  const color = report.band === 'High Risk' ? 'bg-red-600' : report.band === 'Medium Risk' ? 'bg-amber-500' : 'bg-green-600'
+  return (
+    <div className="absolute right-4 top-20 bottom-6 w-80 z-[1000] bg-gray-800 text-white rounded-lg shadow-lg p-4 overflow-y-auto text-sm">
+      <div className="flex justify-between items-center mb-3">
+        <h2 className="text-lg font-bold">Place Safety Report</h2>
+        <button onClick={onClose} className="text-gray-300 text-xl">×</button>
+      </div>
+      <span className={`${color} px-2 py-1 rounded font-semibold`}>{report.band}</span>
+      <p className="mt-3 text-3xl font-bold">{report.final_sri}<span className="text-base text-gray-400"> / 1000</span></p>
+      <p className="text-gray-300">Safer than {report.safer_than_pct}% of Bengaluru</p>
+      <div className="mt-3 space-y-1">
+        <p>City average: {report.city_avg}</p>
+        {report.neighbour_avg !== null && <p>Neighbouring areas: {report.neighbour_avg}</p>}
+        <p>Crime score: {report.crime_sri}</p>
+        <p>Emergency access score: {report.access_sri}</p>
+        <p>Crime rate: {report.crime_rate_per_1000} per 1000 residents</p>
+        <p>Population density: {report.population_density} / sq km</p>
+      </div>
+      <h3 className="mt-4 font-semibold">Nearest police stations</h3>
+      {report.police.map((f, i) => <p key={i} className="text-gray-300">{f.km} km away</p>)}
+      <h3 className="mt-3 font-semibold">Nearest hospitals</h3>
+      {report.hospitals.map((f, i) => <p key={i} className="text-gray-300">{f.km} km away</p>)}
+      <h3 className="mt-4 font-semibold">Key points</h3>
+      <ul className="list-disc ml-5 text-gray-300">
+        {report.notes.map((n, i) => <li key={i}>{n}</li>)}
+      </ul>
+    </div>
+  )
+}
 function App() {
   const [hexagons, setHexagons] = useState([])
   const [facilities, setFacilities] = useState([])
   const [loading, setLoading] = useState(true)
+  const [report, setReport] = useState(null)
+  const openReport = async (lat, lon) => {
+  try {
+    const res = await fetch(`http://127.0.0.1:8000/place-report?lat=${lat}&lon=${lon}`)
+    if (res.ok) setReport(await res.json())
+  } catch (e) { console.error(e) }
+}
 
   useEffect(() => {
     Promise.all([
@@ -154,7 +285,8 @@ function App() {
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
           attribution='&copy; OpenStreetMap contributors'
         />
-        <SearchBar />
+        <SearchBar onFound={openReport} />
+        <RoutePlanner />
 
         {hexagons.map((hex) => (
           <GeoJSON
@@ -173,6 +305,12 @@ function App() {
                 <p>Safety Score: {hex.final_sri.toFixed(1)} / 1000</p>
                 <p>Crime Score: {hex.crime_sri.toFixed(1)}</p>
                 <p>Access Score: {hex.access_sri.toFixed(1)}</p>
+                <button
+  onClick={() => openReport(...centroidOf(hex.geometry))}
+  className="mt-2 w-full bg-emerald-600 text-white rounded px-2 py-1"
+>
+  View full report
+</button>
               </div>
             </Popup>
           </GeoJSON>
@@ -195,6 +333,7 @@ function App() {
 
       <Legend />
       </MapContainer>
+      {report && <ReportPanel report={report} onClose={() => setReport(null)} />}
     </div>
   )
 }
